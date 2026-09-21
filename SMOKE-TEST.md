@@ -135,3 +135,41 @@ With Selby set as the system default browser, click a link in any app
 
 - Expect: the picker appears at the mouse; choosing a browser opens the link
   there; the browser comes to the front.
+
+## 11. Single-click reliability
+
+```sh
+scripts/test-picker.sh
+```
+
+- Expect: nine AppKit regression checks pass. These exercise the actual panel:
+  focus loss, delayed initiating clicks, inside/outside clicks, and Escape.
+  The harness removes its event monitors, closes its windows, and removes its
+  temporary executable. It does not open a browser or register an app.
+- With the installed app, quit Selby, then run `open https://example.com`:
+  the cold launch must show the picker without Settings stealing focus.
+- Dismiss with Escape, wait at least ten minutes, then click one web link in
+  Slack, WhatsApp, or a terminal. Expect the picker to remain until a choice,
+  Escape, or a subsequent outside click. Repeat with a full-screen source app
+  and on a secondary display when available.
+- While the picker is open, switch apps using Cmd-Tab without clicking. A
+  focus change must not discard the link; clicking a browser row still opens it.
+- Confirm an actual outside click dismisses, including clicks in Selby's
+  Settings window. Escape still returns focus after the activation fallback.
+- Browser-launch error recovery: in a disposable test setup, remove a test
+  browser after it appears in the picker, then choose it. Expect a visible
+  error with “Choose Browser Again” and “Cancel”. Retry refreshes discovery
+  and retains the URLs; even one remaining browser gets a picker to avoid
+  automatically retrying a broken launch.
+
+To diagnose a failed click without recording URL contents:
+
+```sh
+/usr/bin/log stream --level info --style compact --predicate 'subsystem == "dev.selby.Selby"'
+```
+
+Expect `Received … URL(s) from macOS`, picker visibility/focus messages, then
+`Opening …` and `Browser accepted …` after selection. Cancellation records its
+reason. A missing receipt points to delivery before Selby's delegate; receipt
+without a visible picker points to presentation. A successful handoff means
+macOS accepted the browser request, not that the destination page loaded.

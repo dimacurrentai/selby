@@ -22,9 +22,7 @@ final class PickerController {
     private var panel: PickerPanel?
     /// The model backing `panel`; kept so URL bursts can coalesce into it.
     private var model: PickerModel?
-    /// Global mouse monitor that cancels the picker when the user clicks in
-    /// another application (our panel never sees those events).
-    private var mouseMonitor: Any?
+    var hasPendingPicker: Bool { model != nil }
     /// The app the user was in when the picker appeared; used to hand focus
     /// back if the activation fallback made Selby the active app.
     private var previousApp: NSRunningApplication?
@@ -42,7 +40,7 @@ final class PickerController {
     private var privateLaunchProcesses: [Process] = []
 
     /// Entry point for every incoming URL open.
-    func present(urls incomingURLs: [URL]) {
+    func present(urls incomingURLs: [URL], forcePicker: Bool = false) {
         // macOS delivers link bursts as one delegate call per URL. If a picker
         // is already up, join it instead of cancelling it — cancelling would
         // silently drop every URL but the last.
@@ -74,7 +72,7 @@ final class PickerController {
             return
         }
         // A menu with a single row is pure friction — open directly.
-        if browsers.count == 1 {
+        if browsers.count == 1, !forcePicker {
             log.notice("Single browser enabled; opening directly in \(browsers[0].name, privacy: .public)")
             open(urls, with: browsers[0])
             return
@@ -107,6 +105,7 @@ final class PickerController {
             case .chose(let browser):
                 self.open(unopenedURLs, with: browser)
             case .cancelled(let reason):
+                self.log.notice("Picker cancelled: \(String(describing: reason), privacy: .public)")
                 if reason == .outsideClick {
                     self.reclaimableURLs = unopenedURLs
                     self.reclaimableSince = Date()
@@ -131,7 +130,9 @@ final class PickerController {
         let panel = PickerPanel(model: model, maxListHeight: maxListHeight)
         self.panel = panel
         position(panel, near: mouse, within: visibleFrame)
+        panel.monitorOutsideClicks()
         panel.makeKeyAndOrderFront(nil)
+        log.notice("Picker visible: \(panel.isVisible), key: \(panel.isKeyWindow)")
 
         // Non-activating panels normally take key focus without activating the
         // app, but fall back to explicit activation if that didn't happen.
@@ -144,11 +145,6 @@ final class PickerController {
             panel.makeKeyAndOrderFront(nil)
         }
 
-        mouseMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { [weak model] _ in
-            Task { @MainActor in model?.cancel(.outsideClick) }
-        }
     }
 
     /// Hands the URLs to the chosen browser and lets it come to the front.
@@ -161,10 +157,20 @@ final class PickerController {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         NSWorkspace.shared.open(urls, withApplicationAt: browser.url, configuration: configuration) { _, error in
-            if let error {
-                Task { @MainActor [log = self.log] in
-                    log.error("Failed to open in \(browser.name): \(error.localizedDescription)")
-                    NSSound.beep()
+            Task { @MainActor in
+                if let error {
+                    self.log.error("Browser handoff failed: \(error.localizedDescription)")
+                    let alert = NSAlert()
+                    alert.messageText = "Couldn’t open links in \(browser.name)"
+                    alert.informativeText = error.localizedDescription
+                    alert.addButton(withTitle: "Choose Browser Again")
+                    alert.addButton(withTitle: "Cancel")
+                    NSApp.activate(ignoringOtherApps: true)
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        self.present(urls: urls, forcePicker: true)
+                    }
+                } else {
+                    self.log.notice("Browser accepted \(urls.count) URL(s)")
                 }
             }
         }
@@ -338,10 +344,7 @@ final class PickerController {
     }
 
     private func dismissPanel() {
-        if let mouseMonitor {
-            NSEvent.removeMonitor(mouseMonitor)
-            self.mouseMonitor = nil
-        }
+        panel?.stopMonitoringClicks()
         panel?.orderOut(nil)
         panel = nil
         model = nil
