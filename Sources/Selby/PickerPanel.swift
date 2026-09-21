@@ -1,12 +1,17 @@
 import AppKit
 import SelbyCore
 import SwiftUI
+import os
 
 /// A Spotlight-style floating panel: borderless, non-activating, able to take
 /// keyboard focus while the previously frontmost app stays active. Dismisses
-/// on Escape, on losing key status, or via `PickerModel` callbacks.
+/// on Escape, on an actual outside click, or via `PickerModel` callbacks.
 final class PickerPanel: NSPanel {
     private let model: PickerModel
+    private let log = Logger(subsystem: "dev.selby.Selby", category: "picker")
+    private var globalMouseMonitor: Any?
+    private var localMouseMonitor: Any?
+    private var presentedAt: TimeInterval = 0
 
     init(model: PickerModel, maxListHeight: CGFloat) {
         self.model = model
@@ -21,8 +26,7 @@ final class PickerPanel: NSPanel {
         backgroundColor = .clear
         isOpaque = false
         hasShadow = true
-        // Panels hide on app deactivation by default; we manage dismissal
-        // ourselves via resignKey, so keep the panel visible.
+        // Focus changes alone must not hide or discard an unopened link.
         hidesOnDeactivate = false
         // Show over full-screen apps and on whichever Space the click happened.
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
@@ -54,10 +58,38 @@ final class PickerPanel: NSPanel {
         model.cancel(.dismissed)
     }
 
-    // Losing key status means the user clicked elsewhere — cancel, but flag it
-    // as an outside click so a link click's URL can reclaim these URLs.
     override func resignKey() {
         super.resignKey()
+        log.notice("Picker lost keyboard focus; retaining pending links")
+    }
+
+    /// Event timestamps and systemUptime use the same monotonic clock. A
+    /// delayed copy of the click that opened us must not also dismiss us.
+    func monitorOutsideClicks() {
+        stopMonitoringClicks()
+        presentedAt = ProcessInfo.processInfo.systemUptime
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
+            // AppKit invokes both event monitors on the main thread. Handle
+            // synchronously so cancellation cannot run after another URL arrives.
+            MainActor.assumeIsolated { self?.handleMouseDown(event, local: false) }
+        }
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            MainActor.assumeIsolated { self?.handleMouseDown(event, local: true) }
+            return event
+        }
+    }
+
+    func handleMouseDown(_ event: NSEvent, local: Bool) {
+        guard event.timestamp > presentedAt else { return }
+        guard !local || event.window !== self else { return }
         model.cancel(.outsideClick)
+    }
+
+    func stopMonitoringClicks() {
+        if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
+        if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
+        globalMouseMonitor = nil
+        localMouseMonitor = nil
     }
 }
